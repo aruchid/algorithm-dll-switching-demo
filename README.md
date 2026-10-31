@@ -4,6 +4,52 @@
 
 主要面向 Windows DLL 部署场景。现有代码使用 Qt `QLibrary`，但这不代表当前工程已通过 Windows、Linux 或 macOS 的跨平台构建验证。
 
+## 架构总览
+
+宿主负责输入、配置和结果展示；`InferProcess` 负责选择、加载和调用算法；具体模型与推理引擎封装在独立动态库中。下图展示模块职责及集成边界，**不代表整条链路已运行通过**。
+
+```mermaid
+flowchart TB
+    subgraph HOST["宿主应用 · Qt / C++"]
+        CONFIG["配置管理<br/>ConfigManager / YAML"]
+        INPUT["图像输入<br/>CameraController"]
+        APP["界面与任务调度<br/>MainWindow<br/>ThreadController"]
+    end
+
+    LOAD["算法加载器 · InferProcess<br/>类型识别 / 库名映射<br/>QLibrary 加载与符号解析"]
+    API["宿主 / 插件接口边界<br/>CreateInferImpl / DeleteInferImpl<br/>InferProcessImpl 纯虚接口"]
+
+    subgraph PLUGINS["外部算法 DLL · 实现与模型包未随仓库提供"]
+        DET["检测 / 分割插件<br/>.det / .seg"]
+        OTHER["分类 / OCR 插件<br/>.cls / .ocr"]
+    end
+
+    OUTPUT["宿主结果消费<br/>DisplayProcess<br/>Communication"]
+
+    CONFIG -.->|"算法配置"| LOAD
+    INPUT -.->|"输入帧"| LOAD
+    APP -.->|"加载 / 推理请求"| LOAD
+    LOAD -->|"解析工厂函数 · 调用实现对象"| API
+    API -.->|"按任务选择实现"| DET
+    API -.->|"按任务选择实现"| OTHER
+    DET -.->|"推理结果"| OUTPUT
+    OTHER -.->|"推理结果"| OUTPUT
+
+    classDef implemented fill:#e8f1ff,stroke:#4169a1,color:#142c49,stroke-width:1.5px;
+    classDef partial fill:#f3f4f6,stroke:#828b98,color:#303945,stroke-dasharray:5 4;
+    classDef external fill:#fff4df,stroke:#ad7b25,color:#513a13,stroke-dasharray:5 4;
+    class CONFIG,LOAD,API implemented;
+    class INPUT,APP,OUTPUT partial;
+    class DET,OTHER external;
+```
+
+**图例：** 蓝色为仓库中已有代码或接口定义；灰色为声明或实现片段；橙色为外部插件与模型。虚线表示待接通的应用链路或外部插件契约，不能作为调用链已完成的证据；蓝色也不代表已经编译或运行验证。
+
+- **插件职责：** `Load / Infer / BatchSize / GetModelInfo` 由插件实现，模型资源、预处理、推理与后处理留在插件内部。
+- **替换点：** 同一任务、同一输入输出契约下替换插件实现；切换检测、分割、分类或 OCR 时，还需要匹配结果消费方式。
+- **当前切换方式：** `Load()` 先 `Release()`，再加载新库；新库加载失败时不会自动恢复旧实例。
+- **后续演进：** 版本化 C ABI、候选预热、实例快照与失败保留旧插件，见 [架构设计与实施计划](docs/ARCHITECTURE.md)。这些机制尚未实现。
+
 ## 为什么做这个项目
 
 相机采集、界面、通信与算法经常一起编译。一旦更换模型或推理引擎，就需要重编译整个应用，还容易把设备逻辑与算法依赖绑在一起。本项目希望把边界收敛到宿主与算法插件之间：宿主负责输入、调度与展示，插件负责模型资源与推理实现。
